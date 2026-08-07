@@ -16,7 +16,7 @@ Install directly from GitHub with Emacs 30:
 
 #+begin_src emacs-lisp
 (package-vc-install
- "https://github.com/chuxubank/package-vc-skip-unchanged")
+ "https://github.com/cat-emacs/package-vc-skip-unchanged")
 #+end_src
 
 Then enable the global mode:

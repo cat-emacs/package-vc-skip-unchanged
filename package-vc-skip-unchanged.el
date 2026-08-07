@@ -7,7 +7,7 @@
 ;; Version: 0.2.1
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: convenience, package
-;; URL: https://github.com/chuxubank/package-vc-skip-unchanged
+;; URL: https://github.com/cat-emacs/package-vc-skip-unchanged
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
