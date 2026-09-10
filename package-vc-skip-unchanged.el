@@ -4,7 +4,7 @@
 
 ;; Author: Misaka <chuxubank@qq.com>
 ;; Maintainer: Misaka <chuxubank@qq.com>
-;; Version: 0.2.1
+;; Version: 0.2.2
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: convenience, package
 ;; URL: https://github.com/cat-emacs/package-vc-skip-unchanged
@@ -22,6 +22,11 @@
 ;; already matches their upstream commit.  Packages that changed, use another
 ;; VC backend, or could not be checked are passed to the native
 ;; `package-vc-upgrade' implementation.
+;;
+;; `package-vc' checks packages out at an explicit revision, so their HEAD is
+;; usually detached and has no upstream branch.  The upstream commit is then
+;; taken from the remote tracking branch named by the package specification,
+;; or from the default branch the remote advertises.
 ;;
 ;; Enable the behavior globally with `package-vc-skip-unchanged-mode'.
 
@@ -71,21 +76,87 @@ Each job includes the remote check and, when needed, the native upgrade."
           (push pkg-desc packages))))))
 
 (defun package-vc-skip-unchanged--git-output (pkg-desc &rest args)
-  "Run Git with ARGS for PKG-DESC and return its trimmed output."
+  "Run Git with ARGS for PKG-DESC and return its trimmed output.
+Signal an error when Git exits with a non-zero status, so that a
+diagnostic written to stderr is never mistaken for Git output."
   (let ((default-directory (package-desc-dir pkg-desc)))
     (string-trim
      (with-output-to-string
-       (apply #'vc-git-command standard-output nil nil args)))))
+       (apply #'vc-git-command standard-output 0 nil args)))))
+
+(defun package-vc-skip-unchanged--git-string (pkg-desc &rest args)
+  "Run Git with ARGS for PKG-DESC and return its output.
+Return nil when Git fails or prints nothing."
+  (condition-case nil
+      (let ((output (apply #'package-vc-skip-unchanged--git-output
+                           pkg-desc args)))
+        (unless (string-empty-p output)
+          output))
+    (error nil)))
+
+(defun package-vc-skip-unchanged--resolve (pkg-desc revision)
+  "Return the commit hash REVISION names for PKG-DESC, or nil."
+  (package-vc-skip-unchanged--git-string
+   pkg-desc "rev-parse" "--verify" "--quiet"
+   (concat revision "^{commit}")))
+
+(defun package-vc-skip-unchanged--spec-branch (pkg-desc)
+  "Return the branch PKG-DESC tracks per its package specification."
+  (condition-case nil
+      (plist-get (package-vc--desc->spec pkg-desc) :branch)
+    (error nil)))
+
+(defun package-vc-skip-unchanged--remote (pkg-desc)
+  "Return the Git remote name PKG-DESC is compared against, or nil."
+  (let ((branch (package-vc-skip-unchanged--git-string
+                 pkg-desc "symbolic-ref" "--quiet" "--short" "HEAD"))
+        (remotes (split-string
+                  (or (package-vc-skip-unchanged--git-string pkg-desc "remote")
+                      "")
+                  "\n" t)))
+    (or (and branch
+             (package-vc-skip-unchanged--git-string
+              pkg-desc "config" "--get"
+              (format "branch.%s.remote" branch)))
+        (car (member "origin" remotes))
+        (car remotes))))
+
+(defun package-vc-skip-unchanged--upstream-revision (pkg-desc)
+  "Return the upstream commit hash for PKG-DESC, or nil when unknown.
+`package-vc' checks packages out at an explicit revision, so HEAD is
+commonly detached and \"@{u}\" has no upstream branch to resolve.  Fall
+back to the remote tracking branch named by the package specification,
+then to the default branch the remote advertises."
+  (or (package-vc-skip-unchanged--resolve pkg-desc "@{u}")
+      (when-let* ((remote (package-vc-skip-unchanged--remote pkg-desc)))
+        (let ((branch (package-vc-skip-unchanged--spec-branch pkg-desc)))
+          (or (and branch
+                   (package-vc-skip-unchanged--resolve
+                    pkg-desc (format "refs/remotes/%s/%s" remote branch)))
+              (package-vc-skip-unchanged--resolve
+               pkg-desc (format "refs/remotes/%s/HEAD" remote)))))))
 
 (defun package-vc-skip-unchanged--same-revision-p (pkg-desc)
   "Return non-nil when PKG-DESC is at its upstream revision."
-  (string= (package-vc-skip-unchanged--git-output pkg-desc "rev-parse" "HEAD")
-           (package-vc-skip-unchanged--git-output pkg-desc "rev-parse" "@{u}")))
+  (let ((upstream (package-vc-skip-unchanged--upstream-revision pkg-desc)))
+    (unless upstream
+      (error "No upstream revision found for %s"
+             (package-desc-name pkg-desc)))
+    (string= (package-vc-skip-unchanged--git-output pkg-desc "rev-parse" "HEAD")
+             upstream)))
+
+(defun package-vc-skip-unchanged--fetch-args (pkg-desc)
+  "Return the Git fetch arguments used to refresh PKG-DESC."
+  (let ((remote (package-vc-skip-unchanged--remote pkg-desc)))
+    ;; Name the remote explicitly: a detached HEAD has no branch whose
+    ;; configuration Git could consult to pick one.
+    (append '("fetch" "--quiet") (and remote (list remote)))))
 
 (defun package-vc-skip-unchanged--fetch-upstream (pkg-desc)
   "Fetch the Git upstream for PKG-DESC synchronously."
   (let ((default-directory (package-desc-dir pkg-desc)))
-    (vc-git-command t 0 nil "fetch" "--quiet")))
+    (apply #'vc-git-command t 0 nil
+           (package-vc-skip-unchanged--fetch-args pkg-desc))))
 
 (defun package-vc-skip-unchanged-upgrade (original pkg-desc)
   "Call ORIGINAL for PKG-DESC unless its upstream revision is unchanged."
@@ -217,7 +288,8 @@ Each job includes the remote check and, when needed, the native upgrade."
                                (package-desc-name pkg-desc))
                  :buffer buffer
                  :stderr buffer
-                 :command (list vc-git-program "fetch" "--quiet")
+                 :command (cons vc-git-program
+                                (package-vc-skip-unchanged--fetch-args pkg-desc))
                  :connection-type 'pipe
                  :noquery t
                  :sentinel #'package-vc-skip-unchanged--fetch-sentinel))

@@ -158,5 +158,65 @@
       (setq package-vc-skip-unchanged--upgrade-state nil)
       (delete-directory root t))))
 
+(defun package-vc-skip-unchanged-test--git (root name &rest args)
+  "Run Git with ARGS in the NAME repository under ROOT."
+  (let ((default-directory (expand-file-name name root)))
+    (apply #'process-file "git" nil nil nil args)))
+
+(defun package-vc-skip-unchanged-test--make-remote (root)
+  "Create an upstream repository under ROOT and return its directory."
+  (let ((dir (expand-file-name "remote" root)))
+    (make-directory dir)
+    (package-vc-skip-unchanged-test--git root "remote" "init" "--quiet"
+                                        "--initial-branch" "main")
+    (package-vc-skip-unchanged-test--git root "remote" "config"
+                                        "user.email" "test@example.com")
+    (package-vc-skip-unchanged-test--git root "remote" "config"
+                                        "user.name" "Test")
+    (with-temp-file (expand-file-name "pkg.el" dir)
+      (insert ";;; pkg.el --- Test -*- lexical-binding: t; -*-\n"))
+    (package-vc-skip-unchanged-test--git root "remote" "add" "pkg.el")
+    (package-vc-skip-unchanged-test--git root "remote" "commit" "--quiet"
+                                        "-m" "Initial")
+    dir))
+
+(ert-deftest package-vc-skip-unchanged-detects-detached-head-as-unchanged ()
+  "A detached checkout at the upstream commit must count as unchanged.
+`package-vc' checks packages out at an explicit revision, so \"@{u}\"
+cannot resolve an upstream branch."
+  (let* ((root (make-temp-file "package-vc-skip-unchanged-detached-" t))
+         (remote (package-vc-skip-unchanged-test--make-remote root))
+         (clone (expand-file-name "clone" root))
+         (desc (package-desc-create
+                :name 'cat-vc-detached :version '(0) :summary "Test"
+                :kind 'vc :dir clone)))
+    (unwind-protect
+        (progn
+          (package-vc-skip-unchanged-test--git
+           root "." "clone" "--quiet" remote clone)
+          (let ((head (string-trim
+                       (with-output-to-string
+                         (let ((default-directory clone))
+                           (process-file "git" nil standard-output nil
+                                         "rev-parse" "HEAD"))))))
+            (package-vc-skip-unchanged-test--git
+             root "clone" "checkout" "--quiet" "--detach" head)
+            ;; Guard the precondition the fix is about.
+            (should-not
+             (package-vc-skip-unchanged--git-string desc "rev-parse" "@{u}"))
+            (should (equal (package-vc-skip-unchanged--remote desc) "origin"))
+            (should (equal (package-vc-skip-unchanged--upstream-revision desc)
+                           head))
+            (should (package-vc-skip-unchanged--same-revision-p desc))
+            ;; A new upstream commit must still be detected.
+            (with-temp-file (expand-file-name "pkg.el" remote)
+              (insert ";;; pkg.el --- Test -*- lexical-binding: t; -*-\n"
+                      "(provide 'pkg)\n"))
+            (package-vc-skip-unchanged-test--git root "remote" "commit" "--quiet"
+                                                "-am" "Update")
+            (package-vc-skip-unchanged--fetch-upstream desc)
+            (should-not (package-vc-skip-unchanged--same-revision-p desc))))
+      (delete-directory root t))))
+
 (provide 'package-vc-skip-unchanged-test)
 ;;; package-vc-skip-unchanged-test.el ends here
