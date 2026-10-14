@@ -55,20 +55,19 @@
             (should (= upgrade-count 1)))
         (package-vc-skip-unchanged-mode -1)))))
 
-(ert-deftest package-vc-skip-unchanged-covers-package-upgrade-all ()
+(ert-deftest package-vc-skip-unchanged-covers-package-vc-upgrade-all ()
   (let* ((desc (package-desc-create
                 :name 'cat-vc-test :version '(0) :summary "Test"
                 :kind 'vc :dir default-directory))
          (package-alist `((cat-vc-test ,desc)))
          (fetch-count 0)
          (upgrade-count 0))
-    (cl-letf (((symbol-function 'package-refresh-contents) #'ignore)
-              ((symbol-function 'package--upgradeable-packages)
-               (lambda (&optional _include-builtins) '(cat-vc-test)))
-              ((symbol-function 'vc-responsible-backend)
+    (cl-letf (((symbol-function 'vc-responsible-backend)
                (lambda (_dir) 'Git))
-              ((symbol-function 'package-vc-skip-unchanged--fetch-upstream)
-               (lambda (_pkg-desc) (cl-incf fetch-count)))
+              ((symbol-function 'package-vc-skip-unchanged--fetch-args)
+               (lambda (_pkg-desc)
+                 (cl-incf fetch-count)
+                 '("--version")))
               ((symbol-function 'package-vc-skip-unchanged--same-revision-p)
                (lambda (_pkg-desc) t))
               ((symbol-function 'package-vc-upgrade)
@@ -76,9 +75,12 @@
       (unwind-protect
           (progn
             (package-vc-skip-unchanged-mode 1)
-            (package-upgrade-all nil)
-            (should (= fetch-count 1))
-            (should (= upgrade-count 0)))
+            (let ((state (package-vc-upgrade-all)))
+              (should (= fetch-count 1))
+              (should (= upgrade-count 0))
+              (should (= (package-vc-skip-unchanged--upgrade-state-unchanged state)
+                         1))
+              (should-not package-vc-skip-unchanged--upgrade-state)))
         (package-vc-skip-unchanged-mode -1)))))
 
 (ert-deftest package-vc-skip-unchanged-calls-failing-native-upgrade-once ()
